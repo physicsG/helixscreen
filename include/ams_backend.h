@@ -1195,6 +1195,18 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether this lane's spool lives upstream, known lane or not
+     *
+     * True wherever upstream_slot() answers, and also for a lane wired to
+     * upstream storage that has not said which of its lanes is at the head.
+     * Such a lane holds no spool of its own, so it is neither drawn nor
+     * counted as one.
+     */
+    [[nodiscard]] virtual bool lane_spool_is_upstream(int slot_index) const {
+        return upstream_slot(slot_index).has_value();
+    }
+
+    /**
      * @brief The number a spool badge shows for this lane
      *
      * The base numbers lanes 1-based in global order. A backend whose lanes

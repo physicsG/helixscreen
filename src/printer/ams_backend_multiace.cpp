@@ -176,6 +176,22 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
     if (d.event_seq) {
         event_seq_ = *d.event_seq;
     }
+    if (event_seq_ != overrides_seq_) {
+        overrides_seq_ = event_seq_;
+        override_refetch_wanted_ = true;
+    }
+    const bool declarations_moved = d.spools || d.spool_binding;
+    if (d.spools && d.spools->is_object()) {
+        spools_ = *d.spools;
+    }
+    // Whole when present: unbinding deletes the key rather than nulling it.
+    if (d.spool_binding && d.spool_binding->is_object()) {
+        spool_binding_ = *d.spool_binding;
+    }
+    if (declarations_moved) {
+        declarations_ = multiace::merge_declarations(
+            multiace::bound_spools(spools_, spool_binding_), slot_overrides_);
+    }
 
     if (d.ace_heads && active_locked()) {
         // The engine's own list of ACE-driven heads, against ours from the
@@ -193,7 +209,7 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
     }
 
     if (d.api_version || d.mode || d.head_ace || d.head_feeder || d.head_manual || d.head_source ||
-        d.aces) {
+        d.aces || declarations_moved) {
         rebuild_units_locked();
         changed = true;
     }
@@ -207,6 +223,51 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
         pending_load_failed_errors_.push_back(AmsErrorHelper::position_label(tool_noun(), h) +
                                               ": " + lv_tr("Load failed"));
     }
+}
+
+void AmsBackendMultiAce::fetch_slot_overrides() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (override_fetch_in_flight_ || !api_) {
+            return; // the want flag stays set; the reply re-asks
+        }
+        override_fetch_in_flight_ = true;
+        override_refetch_wanted_ = false;
+    }
+    auto token = lifetime_.token();
+    const auto finish = [this](std::optional<multiace::BayDeclarations> parsed) {
+        bool again = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            override_fetch_in_flight_ = false;
+            again = override_refetch_wanted_;
+            if (parsed) {
+                slot_overrides_ = std::move(*parsed);
+                declarations_ = multiace::merge_declarations(
+                    multiace::bound_spools(spools_, spool_binding_), slot_overrides_);
+                rebuild_units_locked();
+            }
+        }
+        if (parsed) {
+            emit_event(EVENT_STATE_CHANGED);
+        }
+        if (again) {
+            fetch_slot_overrides();
+        }
+    };
+    api_->transfers().download_file(
+        "config", "extended/multiace/slot_overrides.json",
+        [token, finish](const std::string& content) {
+            auto parsed = multiace::parse_slot_overrides(content);
+            token.defer("AmsBackendMultiAce::slot_overrides",
+                        [finish, parsed = std::move(parsed)]() mutable { finish(std::move(parsed)); });
+        },
+        [token, finish](const MoonrakerError& error) {
+            // Absent on an install whose web UI never wrote one.
+            spdlog::debug("[AMS multiACE] slot_overrides.json unavailable: {}", error.message);
+            token.defer("AmsBackendMultiAce::slot_overrides_failed",
+                        [finish]() { finish(std::nullopt); });
+        });
 }
 
 void AmsBackendMultiAce::rebuild_units_locked() {
@@ -304,6 +365,24 @@ void AmsBackendMultiAce::rebuild_units_locked() {
                 }
                 helix::ams::ingest(lane_id(slot.global_index), engine);
                 apply_resolved_lane(slot, slot.global_index);
+                // multiACE's own statement replaces the lane's identity whole:
+                // its web UI is where the bay was described, and a stale local
+                // edit must not mask it or lend it a spool name or a Spoolman
+                // link (whose weights would then describe another spool).
+                if (const auto dec = declarations_.find({u.idx, s}); dec != declarations_.end()) {
+                    const multiace::BayDeclaration& bay_dec = dec->second;
+                    slot.material = bay_dec.material;
+                    slot.brand = bay_dec.brand;
+                    slot.spool_name = bay_dec.spool_name;
+                    if (bay_dec.color) {
+                        slot.color_rgb = *bay_dec.color;
+                    }
+                    if (slot.spoolman_id != bay_dec.spoolman_id) {
+                        slot.spoolman_id = bay_dec.spoolman_id;
+                        slot.remaining_weight_g = -1.0f;
+                        slot.total_weight_g = -1.0f;
+                    }
+                }
                 if (const auto ovr = overrides_.find(slot.global_index); ovr != overrides_.end()) {
                     const ams::ResolvedTemps temps = ams::resolved_temps(ovr->second);
                     if (temps.nozzle_temp > 0) {
@@ -534,22 +613,29 @@ std::optional<int> AmsBackendMultiAce::upstream_slot(int slot_index) const {
     return multiace::bay_global(bay->first, bay->second);
 }
 
+bool AmsBackendMultiAce::lane_spool_is_upstream(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return slot_index >= 0 && slot_index < kHeads && ace_fed_locked(slot_index);
+}
+
 int AmsBackendMultiAce::spool_display_number(int slot_index) const {
     if (slot_index < 0) {
         return slot_index + 1;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    // A routed head aliases its bay; every other lane (bays, unrouted heads)
-    // numbers in global order, so the numbers on spool-owning lanes run 1..N.
-    // Only indices a unit actually covers count: a gap the engine left in the
-    // ace numbering is not a spool, so the numbers stay consecutive.
-    const auto aliased = [this](int head) {
-        return head < kHeads && ace_fed_locked(head) && routed_bay_locked(head).has_value();
-    };
+    // An ACE-fed head holds no spool of its own: routed, it wears its bay's
+    // number; unrouted, it has none. Every other lane numbers in global order,
+    // so the numbers on spool-owning lanes run 1..N. Only indices a unit
+    // actually covers count: a gap the engine left in the ace numbering is not
+    // a spool, so the numbers stay consecutive.
+    const auto aliased = [this](int head) { return head < kHeads && ace_fed_locked(head); };
     int target = slot_index;
     if (aliased(slot_index)) {
-        const auto bay = *routed_bay_locked(slot_index);
-        target = multiace::bay_global(bay.first, bay.second);
+        const auto bay = routed_bay_locked(slot_index);
+        if (!bay) {
+            return 0;
+        }
+        target = multiace::bay_global(bay->first, bay->second);
     }
     int n = 0;
     for (int gi = 0; gi < system_info_.total_slots; ++gi) {
@@ -787,9 +873,14 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
 void AmsBackendMultiAce::handle_status(const nlohmann::json& status) {
     AmsBackendSnapmaker::handle_status(status);
     std::vector<std::string> load_failed;
+    bool want_overrides = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         load_failed.swap(pending_load_failed_errors_);
+        want_overrides = override_refetch_wanted_ && active_locked();
+    }
+    if (want_overrides) {
+        fetch_slot_overrides();
     }
     for (const std::string& message : load_failed) {
         emit_event(kEventError, message);

@@ -266,6 +266,117 @@ StatusDelta parse_ace_status(const json& ace) {
     return d;
 }
 
+namespace {
+
+/// "<ace>_<bay>" with both in range, or nullopt.
+std::optional<std::pair<int, int>> parse_bay_key(std::string_view key) {
+    const size_t sep = key.find('_');
+    if (sep == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto ace = helix::text_io::parse_int<int>(key.substr(0, sep));
+    const auto bay = helix::text_io::parse_int<int>(key.substr(sep + 1));
+    if (!ace || !bay || *ace < 0 || *bay < 0 || *bay >= kBaysPerUnit) {
+        return std::nullopt;
+    }
+    return std::make_pair(*ace, *bay);
+}
+
+std::optional<uint32_t> declared_color(const json& obj) {
+    const std::string hex = str_or_empty(obj, "color");
+    if (hex.empty()) {
+        return std::nullopt;
+    }
+    const auto reading = helix::ams::read_lane_color(hex);
+    if (reading.kind != helix::ams::ColorReadingKind::Observed) {
+        return std::nullopt;
+    }
+    return reading.rgb;
+}
+
+/// The spool id a binding value names; the engine writes it as a string.
+std::string spool_id_of(const json& v) {
+    if (v.is_string()) {
+        return v.get<std::string>();
+    }
+    if (v.is_number_integer()) {
+        return std::to_string(v.get<int64_t>());
+    }
+    return {};
+}
+
+} // namespace
+
+BayDeclarations bound_spools(const json& spools, const json& spool_binding) {
+    BayDeclarations out;
+    if (!spools.is_object() || !spool_binding.is_object()) {
+        return out;
+    }
+    for (const auto& [key, value] : spool_binding.items()) {
+        const auto bay = parse_bay_key(key);
+        const std::string id = spool_id_of(value);
+        if (!bay || id.empty()) {
+            continue;
+        }
+        const auto it = spools.find(id);
+        if (it == spools.end() || !it->is_object()) {
+            continue;
+        }
+        BayDeclaration d;
+        d.material = str_or_empty(*it, "material");
+        d.brand = str_or_empty(*it, "vendor");
+        d.spool_name = str_or_empty(*it, "label");
+        d.color = declared_color(*it);
+        // A string on this wire, unlike everywhere else a spoolman id appears.
+        const json sm = it->value("spoolman_id", json());
+        const std::string sm_text = spool_id_of(sm);
+        d.spoolman_id = helix::text_io::parse_int<int>(sm_text).value_or(0);
+        out[*bay] = std::move(d);
+    }
+    return out;
+}
+
+BayDeclarations parse_slot_overrides(std::string_view content) {
+    BayDeclarations out;
+    const json doc = json::parse(content.begin(), content.end(), nullptr, false);
+    if (doc.is_discarded() || !doc.is_object()) {
+        return out;
+    }
+    // The web API wraps the same map as {"overrides": {...}}.
+    const json& map = (doc.contains("overrides") && doc["overrides"].is_object())
+                          ? doc["overrides"]
+                          : doc;
+    for (const auto& [key, v] : map.items()) {
+        const auto bay = parse_bay_key(key);
+        if (!bay || !v.is_object()) {
+            continue;
+        }
+        BayDeclaration d;
+        d.material = str_or_empty(v, "material");
+        d.brand = str_or_empty(v, "brand");
+        d.color = declared_color(v);
+        out[*bay] = std::move(d);
+    }
+    return out;
+}
+
+BayDeclarations merge_declarations(const BayDeclarations& bound, const BayDeclarations& overrides) {
+    BayDeclarations out = bound;
+    for (const auto& [bay, ov] : overrides) {
+        BayDeclaration& d = out[bay];
+        if (!ov.material.empty()) {
+            d.material = ov.material;
+        }
+        if (!ov.brand.empty()) {
+            d.brand = ov.brand;
+        }
+        if (ov.color) {
+            d.color = ov.color;
+        }
+    }
+    return out;
+}
+
 std::optional<uint32_t> head_source_color(const HeadSource& source) {
     if (source.color_hex.empty()) {
         return std::nullopt;

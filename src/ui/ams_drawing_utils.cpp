@@ -825,7 +825,12 @@ lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, boo
     lv_obj_add_flag(badge, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_t* lbl = lv_label_create(badge);
     char txt[8];
-    snprintf(txt, sizeof(txt), "%d", lane_number); // 1-based; lane numbers not translated
+    // 1-based; lane numbers not translated. A lane holding no spool of its own
+    // has no number.
+    if (lane_number > 0)
+        snprintf(txt, sizeof(txt), "%d", lane_number);
+    else
+        snprintf(txt, sizeof(txt), "-");
     lv_label_set_text(lbl, txt);
     const lv_font_t* f = theme_manager_get_font("font_xs");
     if (f)

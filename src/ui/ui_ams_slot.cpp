@@ -388,7 +388,11 @@ static void apply_badge_number(AmsSlotData* data) {
     const int number = backend ? backend->spool_display_number(data->slot_index)
                                : helix::ui::lane_number(data->slot_index);
     char badge_text[16];
-    snprintf(badge_text, sizeof(badge_text), "%d", number);
+    // A lane holding no spool of its own has no number.
+    if (number > 0)
+        snprintf(badge_text, sizeof(badge_text), "%d", number);
+    else
+        snprintf(badge_text, sizeof(badge_text), "-");
     lv_label_set_text(data->slot_badge, badge_text);
 }
 

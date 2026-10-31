@@ -449,15 +449,18 @@ static void rebuild_bars(AmsMiniStatusData* data) {
             int32_t bar_width = ams_draw::calc_bar_width(container_width, row_slots, gap,
                                                          kMinBarWidthPx, max_bw, 90);
 
-            // Create/update slots in this unit row
+            // Create/update slots in this unit row. A lane whose spool lives
+            // upstream is that spool's path onward, not a spool: no bar.
+            helix::AmsBackend* lane_backend = helix::AmsState::instance().get_backend();
             for (int s = 0; s < row_info->slot_count; ++s) {
                 int global_idx = row_info->first_slot + s;
                 if (global_idx >= AMS_MINI_STATUS_MAX_VISIBLE)
                     break;
 
                 lv_obj_t* bar = data->lane_bars[global_idx];
+                const bool fed = lane_backend && lane_backend->lane_spool_is_upstream(global_idx);
 
-                if (global_idx < visible_count) {
+                if (global_idx < visible_count && !fed) {
                     if (!bar) {
                         bar = create_lane_bar(row, global_idx, bar_width, bar_height);
                         data->lane_bars[global_idx] = bar;

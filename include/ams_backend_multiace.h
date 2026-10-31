@@ -46,9 +46,14 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// else, bays included (a bay is where its spool lives).
     [[nodiscard]] std::optional<int> upstream_slot(int slot_index) const override;
 
+    /// Every ACE-fed head, routed or not: the ACE holds its spool even before
+    /// the engine says which bay is at the head.
+    [[nodiscard]] bool lane_spool_is_upstream(int slot_index) const override;
+
     /// Bays number the spools 1-based in global order; a routed head wears
     /// its bay's number so the two lanes count one spool, and the numbers on
-    /// the lanes that hold their own spools stay consecutive.
+    /// the lanes that hold their own spools stay consecutive. An ACE-fed head
+    /// with no routed bay holds no spool and answers 0.
     [[nodiscard]] int spool_display_number(int slot_index) const override;
 
     /// A bay into a head holding another bay is not a swap for the screen to
@@ -171,6 +176,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// empty. Moonraker batches status, so the frame can trail the answer.
     static constexpr std::chrono::seconds kPendingLoadGrace{15};
 
+    /// Reads multiACE's slot_overrides.json and lays it over the bays. One
+    /// download at a time; a request made while one is out runs when it
+    /// returns. Takes mutex_ itself.
+    void fetch_slot_overrides();
+
     /// Drops a pending bay load: another filament op owns the heads now.
     void cancel_pending_load(const char* why);
 
@@ -198,6 +208,19 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     std::string swap_phase_;
     multiace::LastSwap last_swap_;
     int64_t event_seq_ = -1;
+
+    /// multiACE's own statement of what each bay holds: its spool table and
+    /// bindings, with slot_overrides.json laid over them. It outranks the lane
+    /// model for any bay it describes. All under mutex_.
+    nlohmann::json spools_ = nlohmann::json::object();
+    nlohmann::json spool_binding_ = nlohmann::json::object();
+    multiace::BayDeclarations slot_overrides_;
+    multiace::BayDeclarations declarations_;
+    /// event_seq the last override download was asked for: the file lives on
+    /// disk, and the engine bumps event_seq on every state change it makes.
+    int64_t overrides_seq_ = -2;
+    bool override_fetch_in_flight_ = false;
+    bool override_refetch_wanted_ = false;
     /// api_version mismatch already logged, so a stream of frames logs once.
     bool api_mismatch_logged_ = false;
 
