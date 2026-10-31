@@ -2192,8 +2192,9 @@ void AmsBackendSnapmaker::apply_channel_progress_locked(int i, const std::string
     // so an incremental status omitting it doesn't clear the
     // phase spuriously.
     if (!state.empty()) {
-        if (system_info_.operation_phase != info.phase) {
-            system_info_.operation_phase = info.phase;
+        const int phase = step_phase_locked(i, info);
+        if (system_info_.operation_phase != phase) {
+            system_info_.operation_phase = phase;
             fx.changed = true;
         }
     }

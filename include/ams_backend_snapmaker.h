@@ -635,6 +635,15 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         return false;
     }
 
+    /// The step-bar index @p info stands for on @p head: the classifier's own
+    /// per-direction index unless an extension runs an operation whose bar
+    /// spans both directions. Caller holds mutex_.
+    [[nodiscard]] virtual int step_phase_locked(int head,
+                                                const snapmaker::ChannelStateInfo& info) const {
+        (void)head;
+        return info.phase;
+    }
+
     /// Whether a channel reaching preload_finish straight from an unload's
     /// in-progress states ends that unload on @p head. A stock unload ends at
     /// unload_finish and only rests at preload_finish.

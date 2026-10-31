@@ -478,6 +478,52 @@ TEST_CASE_METHOD(MultiAceFixture, "load bay emits ACE and SLOT always", "[multia
     }
 }
 
+TEST_CASE_METHOD(MultiAceFixture, "a bay swap runs on one bar", "[multiace]") {
+    CapturingMultiAce b;
+    b.frame(ace_frame("head_mode_4ace.json"));
+    b.frame(json{{"toolhead", {{"extruder", "extruder"}}}});
+    // Head 0 holds ACE 1 bay 1; loading bay 2 is a swap.
+    REQUIRE(b.load_filament(multiace::bay_global(0, 1)).success());
+    const auto model = b.get_operation_step_model(StepOperationType::LOAD_FRESH);
+    REQUIRE(model.steps.size() == 7);
+    CHECK(model.steps[3].label == "Retract");
+    CHECK(model.steps[4].label == "Feed filament");
+    b.answer_ok();
+
+    const auto phase = [&b] { return b.get_system_info().operation_phase; };
+    const auto action = [&b] { return b.get_system_info().action; };
+    // The unload half lands on the bar's first four steps.
+    b.frame(feed_frame(0, "unload_heating"));
+    CHECK(phase() == 2);
+    CHECK(action() == AmsAction::HEATING);
+    b.frame(feed_frame(0, "unload_doing"));
+    CHECK(phase() == 3);
+    CHECK(action() == AmsAction::UNLOADING);
+    // Between the halves the bar holds on the retract.
+    json emptied = {{"ace", {{"head_source", {{"2", {{"ace_index", 2}, {"slot", 3}}}}}}}};
+    emptied.update(feed_frame(0, "preload_finish"));
+    b.frame(emptied);
+    REQUIRE(b.sent.size() == 2);
+    CHECK(phase() == 3);
+    CHECK(b.running_step_operation() == std::optional<StepOperationType>{StepOperationType::LOAD_FRESH});
+    // The load half skips its own Home / Select / Heat.
+    b.frame(feed_frame(0, "load_picking"));
+    CHECK(phase() == 3);
+    b.frame(feed_frame(0, "load_feeding"));
+    CHECK(phase() == 4);
+    CHECK(action() == AmsAction::LOADING);
+    b.frame(feed_frame(0, "load_extruding"));
+    CHECK(phase() == 5);
+    b.frame(feed_frame(0, "load_flushing"));
+    CHECK(phase() == 6);
+    CHECK(action() == AmsAction::PURGING);
+    // Once the load half ends the swap is over: the U1's own steps again.
+    b.frame(feed_frame(0, "load_finish"));
+    CHECK_FALSE(b.running_step_operation().has_value());
+    b.frame(feed_frame(0, "load_feeding"));
+    CHECK(phase() == 2);
+}
+
 TEST_CASE_METHOD(MultiAceFixture, "load into an occupied head unloads first", "[multiace]") {
     CapturingMultiAce b;
     b.frame(ace_frame("head_mode_4ace.json"));

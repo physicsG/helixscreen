@@ -3,6 +3,8 @@
 
 #include "ams_backend_multiace.h"
 
+#include "ams_state.h"
+
 #include "ace_slot_parse.h"
 #include "ams_fault_event.h"
 #include "klipper_extruder_naming.h"
@@ -416,6 +418,140 @@ bool AmsBackendMultiAce::resume_may_refeed_locked(int head) const {
     // firmware's load, which the engine is not known to honour mid-print.
     (void)head;
     return !active_locked();
+}
+
+namespace {
+
+// The swap bar: the unload half's four steps in the U1 unload model's own
+// order, then the load half without its Home / Select / Heat, which pass
+// straight through on a head that is already picked and hot.
+constexpr int kSwapStepRetract = 3;
+constexpr int kSwapStepFeed = 4;
+constexpr int kSwapStepExtrude = 5;
+constexpr int kSwapStepPurge = 6;
+constexpr std::array kSwapStepActions{AmsAction::UNLOADING, AmsAction::UNLOADING,
+                                      AmsAction::HEATING,   AmsAction::UNLOADING,
+                                      AmsAction::LOADING,   AmsAction::LOADING,
+                                      AmsAction::PURGING};
+
+// classify_channel_state()'s load-direction indices.
+constexpr int kLoadPhaseFeed = 2;
+constexpr int kLoadPhaseHeat = 3;
+constexpr int kLoadPhaseExtrude = 4;
+constexpr int kLoadPhasePurge = 5;
+
+} // namespace
+
+AmsBackend::OperationStepModel
+AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
+    bool swap = false;
+    if (op != StepOperationType::UNLOAD) {
+        // The model is asked for before the load goes out, so a swap not yet
+        // dispatched is read off the head it will run on: an ACE-fed head the
+        // engine records a bay in. The sidebar names the lane it is loading
+        // just before it asks (main thread, as is this call).
+        const int target = lv_subject_get_int(AmsState::instance().get_pending_target_slot_subject());
+        std::lock_guard<std::mutex> lock(mutex_);
+        int head = system_info_.current_tool;
+        if (swap_head_ >= 0) {
+            head = swap_head_;
+        } else if (target >= kHeads) {
+            head = head_for_global_locked(target).value_or(-1);
+        } else if (target >= 0) {
+            head = target;
+        }
+        swap = swap_head_ >= 0 || (head >= 0 && head < kHeads && ace_fed_locked(head) &&
+                                   head_source_[static_cast<size_t>(head)].has_value());
+    }
+    if (!swap) {
+        return AmsBackendSnapmaker::get_operation_step_model(op);
+    }
+    OperationStepModel model;
+    model.steps.push_back({lv_tr("Home"), 0});
+    model.steps.push_back({lv_tr("Select"), 1});
+    model.steps.push_back({lv_tr("Heat nozzle"), 2, false, /*live_temp=*/true});
+    model.steps.push_back({lv_tr("Retract"), kSwapStepRetract});
+    model.steps.push_back({lv_tr("Feed filament"), kSwapStepFeed});
+    model.steps.push_back({lv_tr("Extrude"), kSwapStepExtrude});
+    model.steps.push_back({lv_tr("Purge"), kSwapStepPurge});
+    for (size_t i = 0; i < model.steps.size(); ++i) {
+        model.steps[i].coarse = kSwapStepActions[i];
+    }
+    return model;
+}
+
+std::optional<StepOperationType> AmsBackendMultiAce::running_step_operation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (swap_head_ >= 0) {
+        return StepOperationType::LOAD_FRESH;
+    }
+    return std::nullopt;
+}
+
+int AmsBackendMultiAce::step_phase_locked(int head, const snapmaker::ChannelStateInfo& info) const {
+    if (swap_head_ < 0 || head != swap_head_) {
+        return AmsBackendSnapmaker::step_phase_locked(head, info);
+    }
+    if (info.action == AmsAction::UNLOADING) {
+        return info.phase; // the unload half is the bar's first four steps
+    }
+    if (info.action == AmsAction::LOADING) {
+        switch (info.phase) {
+        case kLoadPhaseFeed:
+        case kLoadPhaseHeat: // already hot: the bar has no second heat step
+            return kSwapStepFeed;
+        case kLoadPhaseExtrude:
+            return kSwapStepExtrude;
+        case kLoadPhasePurge:
+            return kSwapStepPurge;
+        default: // the load half's Home / Select
+            return kSwapStepRetract;
+        }
+    }
+    // Resting between the halves holds the bar on the retract.
+    if (!info.is_fail && swap_progress_seen_ && !swap_load_half_started_) {
+        return kSwapStepRetract;
+    }
+    return -1;
+}
+
+std::optional<AmsAction> AmsBackendMultiAce::step_action_locked() const {
+    if (swap_head_ < 0) {
+        return AmsBackendSnapmaker::step_action_locked();
+    }
+    const int phase = system_info_.operation_phase;
+    if (phase < 0 || phase >= static_cast<int>(kSwapStepActions.size())) {
+        return std::nullopt;
+    }
+    return kSwapStepActions[static_cast<size_t>(phase)];
+}
+
+void AmsBackendMultiAce::track_swap_locked() {
+    if (swap_head_ < 0) {
+        return;
+    }
+    const AmsAction action = system_info_.action;
+    const bool running = action == AmsAction::LOADING || action == AmsAction::UNLOADING;
+    if (running) {
+        swap_progress_seen_ = true;
+    }
+    if (action == AmsAction::LOADING && swap_load_sent_) {
+        swap_load_half_started_ = true;
+    }
+    const bool resting = action == AmsAction::IDLE || action == AmsAction::ERROR;
+    // Over once the load half has run, on any error, or when the load was
+    // dropped before it went out.
+    if ((resting && swap_load_half_started_) || action == AmsAction::ERROR ||
+        (resting && swap_progress_seen_ && !pending_load_ && !swap_load_sent_)) {
+        end_swap_locked();
+    }
+}
+
+void AmsBackendMultiAce::end_swap_locked() {
+    swap_head_ = -1;
+    swap_progress_seen_ = false;
+    swap_load_sent_ = false;
+    swap_load_half_started_ = false;
 }
 
 bool AmsBackendMultiAce::preload_finish_ends_unload_locked(int head) const {
@@ -838,6 +974,8 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         pending.bay = *bay;
         pending.id = id;
         pending_load_ = pending;
+        end_swap_locked();
+        swap_head_ = head;
     }
     const auto answered = [this, id] {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -857,6 +995,7 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
                                      std::lock_guard<std::mutex> lock(mutex_);
                                      if (pending_load_ && pending_load_->id == id) {
                                          pending_load_.reset();
+                                         end_swap_locked();
                                      }
                                  }
                                  emit_event(kEventError, e.message);
@@ -865,6 +1004,7 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (pending_load_ && pending_load_->id == id) {
             pending_load_.reset();
+            end_swap_locked();
         }
     }
     return err;
@@ -878,6 +1018,7 @@ void AmsBackendMultiAce::handle_status(const nlohmann::json& status) {
         std::lock_guard<std::mutex> lock(mutex_);
         load_failed.swap(pending_load_failed_errors_);
         want_overrides = override_refetch_wanted_ && active_locked();
+        track_swap_locked();
     }
     if (want_overrides) {
         fetch_slot_overrides();
@@ -900,6 +1041,7 @@ void AmsBackendMultiAce::cancel_pending_load(const char* why) {
                      pending_load_->bay.first + 1, pending_load_->bay.second + 1,
                      pending_load_->head + 1, why);
         pending_load_.reset();
+        end_swap_locked();
     }
 }
 
@@ -941,6 +1083,11 @@ void AmsBackendMultiAce::advance_pending_load() {
             return;
         }
         pending_load_.reset();
+        if (send) {
+            swap_load_sent_ = true;
+        } else {
+            end_swap_locked();
+        }
     }
     if (send) {
         // A print that took the heads while the unload ran owns them now.
@@ -949,6 +1096,10 @@ void AmsBackendMultiAce::advance_pending_load() {
         }
     }
     if (!dropped.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            end_swap_locked();
+        }
         spdlog::warn("{} Not loading ACE {} bay {} into head {}: {}", backend_log_tag(),
                      pending.bay.first + 1, pending.bay.second + 1, pending.head + 1, dropped);
         emit_event(kEventError,

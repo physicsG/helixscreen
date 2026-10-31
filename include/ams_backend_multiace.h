@@ -46,6 +46,13 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// else, bays included (a bay is where its spool lives).
     [[nodiscard]] std::optional<int> upstream_slot(int slot_index) const override;
 
+    /// A bay swap on an ACE-fed head (its unload, then the bay's load) is one
+    /// operation with one bar; everything else is the U1's own model.
+    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
+    /// A swap in flight is named as the load it started as, so a bar rebuilt
+    /// between its halves is the swap's again.
+    [[nodiscard]] std::optional<StepOperationType> running_step_operation() const override;
+
     /// Every ACE-fed head, routed or not: the ACE holds its spool even before
     /// the engine says which bay is at the head.
     [[nodiscard]] bool lane_spool_is_upstream(int slot_index) const override;
@@ -117,6 +124,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     AmsError do_park_active_tool() override;
     AmsError do_filament_batch(const std::vector<int>& slots, bool load) override;
 
+    /// Inside a swap, both halves' firmware steps land on the swap bar.
+    [[nodiscard]] int step_phase_locked(int head,
+                                        const snapmaker::ChannelStateInfo& info) const override;
+    [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
+
     [[nodiscard]] bool head_is_upstream_fed_locked(int head) const override;
     [[nodiscard]] bool preload_finish_ends_unload_locked(int head) const override;
     /// While the engine is active, Resume never sends the stock AUTO_FEEDING load.
@@ -181,6 +193,12 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// returns. Takes mutex_ itself.
     void fetch_slot_overrides();
 
+    /// Follows a swap across frames: which half is running, and its end.
+    /// Caller holds mutex_.
+    void track_swap_locked();
+    /// Forgets the swap in flight. Caller holds mutex_.
+    void end_swap_locked();
+
     /// Drops a pending bay load: another filament op owns the heads now.
     void cancel_pending_load(const char* why);
 
@@ -226,6 +244,15 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
 
     /// Under mutex_.
     std::optional<PendingBayLoad> pending_load_;
+
+    /// The head a bay swap is running on, -1 for none, from the moment the
+    /// unload goes out until the load half ends. Under mutex_.
+    int swap_head_ = -1;
+    /// The firmware has reported the swap running.
+    bool swap_progress_seen_ = false;
+    /// The bay's load was sent, and has since been reported running.
+    bool swap_load_sent_ = false;
+    bool swap_load_half_started_ = false;
     uint64_t next_pending_id_ = 1;
 
     /// head_source load-failure notices staged under mutex_ by
